@@ -1,5 +1,5 @@
 /**
- *    Copyright 2009-2016 the original author or authors.
+ *    Copyright 2009-2018 the original author or authors.
  *
  *    Licensed under the Apache License, Version 2.0 (the "License");
  *    you may not use this file except in compliance with the License.
@@ -27,10 +27,10 @@ import java.lang.reflect.Type;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Map.Entry;
 
 import org.apache.ibatis.reflection.invoker.GetFieldInvoker;
 import org.apache.ibatis.reflection.invoker.Invoker;
@@ -46,18 +46,16 @@ import org.apache.ibatis.reflection.property.PropertyNamer;
  */
 public class Reflector {
 
-  private static final String[] EMPTY_STRING_ARRAY = new String[0];
-
-  private Class<?> type;
-  private String[] readablePropertyNames = EMPTY_STRING_ARRAY;
-  private String[] writeablePropertyNames = EMPTY_STRING_ARRAY;
-  private Map<String, Invoker> setMethods = new HashMap<String, Invoker>();
-  private Map<String, Invoker> getMethods = new HashMap<String, Invoker>();
-  private Map<String, Class<?>> setTypes = new HashMap<String, Class<?>>();
-  private Map<String, Class<?>> getTypes = new HashMap<String, Class<?>>();
+  private final Class<?> type;
+  private final String[] readablePropertyNames;
+  private final String[] writeablePropertyNames;
+  private final Map<String, Invoker> setMethods = new HashMap<>();
+  private final Map<String, Invoker> getMethods = new HashMap<>();
+  private final Map<String, Class<?>> setTypes = new HashMap<>();
+  private final Map<String, Class<?>> getTypes = new HashMap<>();
   private Constructor<?> defaultConstructor;
 
-  private Map<String, String> caseInsensitivePropertyMap = new HashMap<String, String>();
+  private Map<String, String> caseInsensitivePropertyMap = new HashMap<>();
 
   public Reflector(Class<?> clazz) {
     type = clazz;
@@ -79,7 +77,7 @@ public class Reflector {
     Constructor<?>[] consts = clazz.getDeclaredConstructors();
     for (Constructor<?> constructor : consts) {
       if (constructor.getParameterTypes().length == 0) {
-        if (canAccessPrivateMethods()) {
+        if (canControlMemberAccessible()) {
           try {
             constructor.setAccessible(true);
           } catch (Exception e) {
@@ -94,55 +92,54 @@ public class Reflector {
   }
 
   private void addGetMethods(Class<?> cls) {
-    Map<String, List<Method>> conflictingGetters = new HashMap<String, List<Method>>();
+    Map<String, List<Method>> conflictingGetters = new HashMap<>();
     Method[] methods = getClassMethods(cls);
     for (Method method : methods) {
+      if (method.getParameterTypes().length > 0) {
+        continue;
+      }
       String name = method.getName();
-      if (name.startsWith("get") && name.length() > 3) {
-        if (method.getParameterTypes().length == 0) {
-          name = PropertyNamer.methodToProperty(name);
-          addMethodConflict(conflictingGetters, name, method);
-        }
-      } else if (name.startsWith("is") && name.length() > 2) {
-        if (method.getParameterTypes().length == 0) {
-          name = PropertyNamer.methodToProperty(name);
-          addMethodConflict(conflictingGetters, name, method);
-        }
+      if ((name.startsWith("get") && name.length() > 3)
+          || (name.startsWith("is") && name.length() > 2)) {
+        name = PropertyNamer.methodToProperty(name);
+        addMethodConflict(conflictingGetters, name, method);
       }
     }
     resolveGetterConflicts(conflictingGetters);
   }
 
   private void resolveGetterConflicts(Map<String, List<Method>> conflictingGetters) {
-    for (String propName : conflictingGetters.keySet()) {
-      List<Method> getters = conflictingGetters.get(propName);
-      Iterator<Method> iterator = getters.iterator();
-      Method firstMethod = iterator.next();
-      if (getters.size() == 1) {
-        addGetMethod(propName, firstMethod);
-      } else {
-        Method getter = firstMethod;
-        Class<?> getterType = firstMethod.getReturnType();
-        while (iterator.hasNext()) {
-          Method method = iterator.next();
-          Class<?> methodType = method.getReturnType();
-          if (methodType.equals(getterType)) {
-            throw new ReflectionException("Illegal overloaded getter method with ambiguous type for property "
-                + propName + " in class " + firstMethod.getDeclaringClass()
-                + ".  This breaks the JavaBeans " + "specification and can cause unpredictable results.");
-          } else if (methodType.isAssignableFrom(getterType)) {
-            // OK getter type is descendant
-          } else if (getterType.isAssignableFrom(methodType)) {
-            getter = method;
-            getterType = methodType;
-          } else {
-            throw new ReflectionException("Illegal overloaded getter method with ambiguous type for property "
-                + propName + " in class " + firstMethod.getDeclaringClass()
-                + ".  This breaks the JavaBeans " + "specification and can cause unpredictable results.");
-          }
+    for (Entry<String, List<Method>> entry : conflictingGetters.entrySet()) {
+      Method winner = null;
+      String propName = entry.getKey();
+      for (Method candidate : entry.getValue()) {
+        if (winner == null) {
+          winner = candidate;
+          continue;
         }
-        addGetMethod(propName, getter);
+        Class<?> winnerType = winner.getReturnType();
+        Class<?> candidateType = candidate.getReturnType();
+        if (candidateType.equals(winnerType)) {
+          if (!boolean.class.equals(candidateType)) {
+            throw new ReflectionException(
+                "Illegal overloaded getter method with ambiguous type for property "
+                    + propName + " in class " + winner.getDeclaringClass()
+                    + ". This breaks the JavaBeans specification and can cause unpredictable results.");
+          } else if (candidate.getName().startsWith("is")) {
+            winner = candidate;
+          }
+        } else if (candidateType.isAssignableFrom(winnerType)) {
+          // OK getter type is descendant
+        } else if (winnerType.isAssignableFrom(candidateType)) {
+          winner = candidate;
+        } else {
+          throw new ReflectionException(
+              "Illegal overloaded getter method with ambiguous type for property "
+                  + propName + " in class " + winner.getDeclaringClass()
+                  + ". This breaks the JavaBeans specification and can cause unpredictable results.");
+        }
       }
+      addGetMethod(propName, winner);
     }
   }
 
@@ -155,7 +152,7 @@ public class Reflector {
   }
 
   private void addSetMethods(Class<?> cls) {
-    Map<String, List<Method>> conflictingSetters = new HashMap<String, List<Method>>();
+    Map<String, List<Method>> conflictingSetters = new HashMap<>();
     Method[] methods = getClassMethods(cls);
     for (Method method : methods) {
       String name = method.getName();
@@ -170,11 +167,7 @@ public class Reflector {
   }
 
   private void addMethodConflict(Map<String, List<Method>> conflictingMethods, String name, Method method) {
-    List<Method> list = conflictingMethods.get(name);
-    if (list == null) {
-      list = new ArrayList<Method>();
-      conflictingMethods.put(name, list);
-    }
+    List<Method> list = conflictingMethods.computeIfAbsent(name, k -> new ArrayList<>());
     list.add(method);
   }
 
@@ -257,7 +250,7 @@ public class Reflector {
   private void addFields(Class<?> clazz) {
     Field[] fields = clazz.getDeclaredFields();
     for (Field field : fields) {
-      if (canAccessPrivateMethods()) {
+      if (canControlMemberAccessible()) {
         try {
           field.setAccessible(true);
         } catch (Exception e) {
@@ -314,9 +307,9 @@ public class Reflector {
    * @return An array containing all methods in this class
    */
   private Method[] getClassMethods(Class<?> cls) {
-    Map<String, Method> uniqueMethods = new HashMap<String, Method>();
+    Map<String, Method> uniqueMethods = new HashMap<>();
     Class<?> currentClass = cls;
-    while (currentClass != null) {
+    while (currentClass != null && currentClass != Object.class) {
       addUniqueMethods(uniqueMethods, currentClass.getDeclaredMethods());
 
       // we also need to look for interface methods -
@@ -342,7 +335,7 @@ public class Reflector {
         // if it is known, then an extended class must have
         // overridden a method
         if (!uniqueMethods.containsKey(signature)) {
-          if (canAccessPrivateMethods()) {
+          if (canControlMemberAccessible()) {
             try {
               currentMethod.setAccessible(true);
             } catch (Exception e) {
@@ -375,7 +368,13 @@ public class Reflector {
     return sb.toString();
   }
 
-  private static boolean canAccessPrivateMethods() {
+  /**
+   * Checks whether can control member accessible.
+   *
+   * @return If can control member accessible, it return {@literal true}
+   * @since 3.5.0
+   */
+  public static boolean canControlMemberAccessible() {
     try {
       SecurityManager securityManager = System.getSecurityManager();
       if (null != securityManager) {
